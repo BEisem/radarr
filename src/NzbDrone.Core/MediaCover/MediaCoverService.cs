@@ -4,6 +4,7 @@ using System.IO;
 using System.Net;
 using System.Threading;
 using NLog;
+using NzbDrone.Common.Cache;
 using NzbDrone.Common.Disk;
 using NzbDrone.Common.EnvironmentInfo;
 using NzbDrone.Common.Extensions;
@@ -17,7 +18,7 @@ namespace NzbDrone.Core.MediaCover
 {
     public interface IMapCoversToLocal
     {
-        void ConvertToLocalUrls(int movieId, IEnumerable<MediaCover> covers);
+        void ConvertToLocalUrls(int movieId, IEnumerable<MediaCover> covers, DateTime? added = null);
         string GetCoverPath(int movieId, MediaCoverTypes coverType, int? height = null);
     }
 
@@ -35,12 +36,15 @@ namespace NzbDrone.Core.MediaCover
         private readonly IEventAggregator _eventAggregator;
         private readonly Logger _logger;
 
+        private readonly ICached<bool> _coverExistsCache;
         private readonly string _coverRootFolder;
         private readonly bool _disableMediaCoverCache;
 
         // ImageSharp is slow on ARM (no hardware acceleration on mono yet)
         // So limit the number of concurrent resizing tasks
         private static readonly SemaphoreSlim Semaphore = new((int)Math.Ceiling(Environment.ProcessorCount / 2.0));
+
+        private static readonly TimeSpan CoverExistsCheckWindow = TimeSpan.FromDays(1);
 
         public MediaCoverService(IMediaCoverProxy mediaCoverProxy,
                                  IImageResizer resizer,
@@ -50,6 +54,7 @@ namespace NzbDrone.Core.MediaCover
                                  ICoverExistsSpecification coverExistsSpecification,
                                  IConfigFileProvider configFileProvider,
                                  IEventAggregator eventAggregator,
+                                 ICacheManager cacheManager,
                                  Logger logger)
         {
             _mediaCoverProxy = mediaCoverProxy;
@@ -61,6 +66,7 @@ namespace NzbDrone.Core.MediaCover
             _eventAggregator = eventAggregator;
             _logger = logger;
 
+            _coverExistsCache = cacheManager.GetCache<bool>(GetType(), "coverExists");
             _coverRootFolder = appFolderInfo.GetMediaCoverPath();
             _disableMediaCoverCache = bool.TryParse(Environment.GetEnvironmentVariable("DISABLE_MEDIA_COVER_CACHE"), out var disableMediaCoverCache) && disableMediaCoverCache;
         }
@@ -72,7 +78,7 @@ namespace NzbDrone.Core.MediaCover
             return Path.Combine(GetMovieCoverPath(movieId), coverType.ToString().ToLowerInvariant() + heightSuffix + GetExtension(coverType));
         }
 
-        public void ConvertToLocalUrls(int movieId, IEnumerable<MediaCover> covers)
+        public void ConvertToLocalUrls(int movieId, IEnumerable<MediaCover> covers, DateTime? added = null)
         {
             if (_disableMediaCoverCache)
             {
@@ -103,11 +109,36 @@ namespace NzbDrone.Core.MediaCover
 
                     mediaCover.Url = _configFileProvider.UrlBase + @"/MediaCover/" + movieId + "/" + mediaCover.CoverType.ToString().ToLowerInvariant() + GetExtension(mediaCover.CoverType);
 
-                    if (mediaCover.RemoteUrl.IsNotNullOrWhiteSpace())
+                    if (mediaCover.RemoteUrl.IsNotNullOrWhiteSpace() && CoverExists(movieId, mediaCover.CoverType, added))
                     {
                         mediaCover.Url += "?h=" + mediaCover.RemoteUrl.SHA256Hash()[..20];
                     }
                 }
+            }
+        }
+
+        private bool CoverExists(int movieId, MediaCoverTypes coverType, DateTime? added)
+        {
+            if (!IsRecentlyAdded(added))
+            {
+                return true;
+            }
+
+            var filePath = GetCoverPath(movieId, coverType);
+
+            return _coverExistsCache.Get(filePath, () => _diskProvider.FileExists(filePath));
+        }
+
+        private static bool IsRecentlyAdded(DateTime? added)
+        {
+            return added > DateTime.UtcNow - CoverExistsCheckWindow;
+        }
+
+        private void RemoveCoverExistsCache(Movie movie)
+        {
+            foreach (var cover in movie.MovieMetadata.Value.Images)
+            {
+                _coverExistsCache.Remove(GetCoverPath(movie.Id, cover.CoverType));
             }
         }
 
@@ -144,6 +175,11 @@ namespace NzbDrone.Core.MediaCover
                     {
                         DownloadCover(movie, cover);
                         updated = true;
+                    }
+
+                    if (IsRecentlyAdded(movie.Added))
+                    {
+                        _coverExistsCache.Set(fileName, true);
                     }
                 }
                 catch (HttpException e)
@@ -252,6 +288,8 @@ namespace NzbDrone.Core.MediaCover
         {
             foreach (var movie in message.Movies)
             {
+                RemoveCoverExistsCache(movie);
+
                 var path = GetMovieCoverPath(movie.Id);
                 if (_diskProvider.FolderExists(path))
                 {
