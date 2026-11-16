@@ -11,7 +11,7 @@ FROM ${BASE_IMAGE}
 ARG BUILD_DATE
 ARG VERSION
 ARG RADARR_BRANCH=master
-ARG PACKAGE_AUTHOR="github.com/actuallyevan/Radarr"
+ARG PACKAGE_AUTHOR="github.com/BEisem/radarr"
 ARG TARGETARCH
 
 LABEL org.opencontainers.image.created="${BUILD_DATE}" \
