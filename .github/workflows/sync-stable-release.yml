@@ -24,10 +24,12 @@ jobs:
       - name: Fetch latest release tag from official Radarr
         id: get_release
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Fetch the latest production release (ignores drafts & pre-releases)
-          RELEASE_JSON=$(curl -sSL "https://api.github.com/repos/Radarr/Radarr/releases/latest")
-          TAG_NAME=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
+          # Fetch the latest production release (ignores drafts & pre-releases).
+          # Authenticated via gh so shared-runner IPs don't hit the anonymous API rate limit.
+          TAG_NAME=$(gh api repos/Radarr/Radarr/releases/latest --jq '.tag_name' || true)
 
           if [ -z "$TAG_NAME" ] || [ "$TAG_NAME" = "null" ]; then
             echo "Error: Could not retrieve latest tag from Radarr/Radarr"
